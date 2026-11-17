@@ -2,6 +2,27 @@
 
 Newest first. One entry per decision: date, what was decided, why, and what was rejected.
 
+## 2026-11-17 – Replay compares deterministic event semantics in a fresh sandbox
+Replay records every model-call payload and approval decision, restores the files present at run
+start, reuses recorded child IDs internally, and re-executes tools in a temporary home. Comparison
+keeps event type and deterministic data (notably tool name/args/ok plus a SHA-256 output hash) while
+excluding timestamps, SQLite sequence numbers, IDs, workspace paths and elapsed-time-derived child
+wall budgets. Two crash-boundary representations are also normalized: `delegation_resumed` is
+process bookkeeping, and a successful `send_email` result is equivalent whether it says the outbox
+write was queued or already present after idempotent crash recovery. The requested/edited arguments
+are still compared, so this does not hide recipient changes. Generated regressions keep the recording
+in a readable adjacent JSON fixture rather than a Python blob. Rejected: comparing raw event rows (false divergence on incidental process data),
+mocking tool results (would not detect regressions), and calling the model again (not deterministic).
+
+## 2026-11-17 – Approval UI uses the standard library and the engine's decision path
+The page is served only on `127.0.0.1`, with dependency-free `http.server`, escaped content, no CDN,
+a restrictive CSP and a random per-session CSRF token. Before minting a session or reading a request
+body, it requires an exact `127.0.0.1:<port>` or `localhost:<port>` Host header to block DNS
+rebinding; the in-memory session LRU is capped at 1,000. Approve, reject and edited-args POSTs call
+`Engine.decide`, so schema validation, forbidden-risk checks and the run lock remain single-source.
+Rejected: FastAPI for this local two-page surface (an unnecessary runtime dependency) and a separate
+web mutation layer (would drift from CLI governance).
+
 ## 2026-11-17 – M2 planner uses an Ollama action schema plus one validator-guided repair
 The local planner calls `/api/generate` at `127.0.0.1:11434` with a JSON schema in `format`,
 temperature 0 and seed 42. Its prompt contains the goal, a 6,000-character bounded history, worked
