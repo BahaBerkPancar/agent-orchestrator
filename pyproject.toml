@@ -1,0 +1,17 @@
+[project]
+name = "agent-orchestrator"
+version = "0.1.0"
+description = "Runs multi-step agents that split tasks, use permissioned tools and pause for human approval, with durable checkpoints, budgets and replayable runs (local models only)."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
+
+[project.scripts]
+agent-orchestrator = "agent_orchestrator.cli:main"
+
+[dependency-groups]
+dev = ["pytest", "ruff"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
