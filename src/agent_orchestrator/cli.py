@@ -10,7 +10,9 @@ from pathlib import Path
 
 from . import __version__
 from .engine import Engine, RunBusy, UsageError, load_script
+from .model import OllamaModel
 from .policy import Policy
+from .tools import default_registry
 
 EXIT = {
     "done": 0,
@@ -33,7 +35,10 @@ def _summary(ev):
         detail = (
             a.get("name") or a.get("answer") or a.get("reason") or a.get("task") or ""
         )
-        return f"{a.get('action', '?')} {detail} ({d['tokens']} tokens)".strip()
+        normalized = (
+            f" normalized={'; '.join(d['normalized'])}" if d.get("normalized") else ""
+        )
+        return f"{a.get('action', '?')} {detail} ({d['tokens']} tokens){normalized}".strip()
     if t == "tool_requested":
         return (
             f"{d['call_id']} {d['name']} {json.dumps(d['args'])[:110]} risk={d['risk']}"
@@ -47,6 +52,14 @@ def _summary(ev):
         return f"{d['call_id']} {d['name']} ok={d['ok']}: {d['output'][:100]}"
     if t == "error":
         return d["message"]
+    if t == "delegation_started":
+        return f"worker {d['child_id']} task={d['task']} tools={','.join(d['tools'])}"
+    if t == "delegation_waiting":
+        return f"worker {d['child_id']} waiting for approval"
+    if t == "delegation_resumed":
+        return f"worker {d['child_id']} approval resolved"
+    if t == "delegation_finished":
+        return f"worker {d['child_id']} {d['status']}"
     if t == "budget_hit":
         return d["reason"]
     if t == "finished":
@@ -62,6 +75,8 @@ def _report(state):
         print(
             f"  approve with: agent approve {state.run_id} --decision approve|reject|edit [--args '{{...}}']"
         )
+    elif state.status == "waiting_approval" and state.active_child:
+        print(f"  waiting: approval requested by worker {state.active_child}")
     if state.answer:
         print(f"  answer: {state.answer}")
     if state.reason:
@@ -72,7 +87,7 @@ def _report(state):
 def build_parser():
     p = argparse.ArgumentParser(
         prog="agent",
-        description="Durable, governed agent runs with a scripted fake model.",
+        description="Durable, governed agent runs with scripted or local Ollama planners.",
     )
     p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     p.add_argument(
@@ -86,9 +101,8 @@ def build_parser():
     sub = p.add_subparsers(dest="cmd")
     r = sub.add_parser("run", help="start a run")
     r.add_argument("--goal", required=True)
-    r.add_argument(
-        "--script", required=True, help="JSON list of scripted model actions"
-    )
+    r.add_argument("--model", choices=["scripted", "ollama"], default="scripted")
+    r.add_argument("--script", help="JSON list of actions (required for scripted)")
     r.add_argument(
         "--policy",
         help="policy.toml, remembered for the whole run (default: <home>/policy.toml)",
@@ -109,6 +123,12 @@ def build_parser():
     sh = sub.add_parser("show", help="print a run's event timeline")
     sh.add_argument("run")
     sub.add_parser("runs", help="list runs")
+    ev = sub.add_parser("eval", help="run the 20-task planner evaluation")
+    ev.add_argument("--config", choices=["fake", "ollama"], default="fake")
+    ev.add_argument("--check", action="store_true", help="replay and verify recordings")
+    ev.add_argument("--suite")
+    ev.add_argument("--policy")
+    ev.add_argument("--recording")
     return p
 
 
@@ -118,8 +138,49 @@ def main(argv=None):
     if not args.cmd:
         parser.print_help()
         return EXIT_USAGE
+    if args.cmd == "eval":
+        from .eval import (
+            DEFAULT_POLICY,
+            DEFAULT_RECORDING,
+            DEFAULT_SUITE,
+            check_recording,
+            render_markdown,
+            run_eval,
+            write_results,
+        )
+
+        suite = args.suite or DEFAULT_SUITE
+        policy = args.policy or DEFAULT_POLICY
+        recording = args.recording or DEFAULT_RECORDING
+        try:
+            if args.check:
+                ok = check_recording(suite, policy, recording)
+                print(
+                    "recorded evaluation reproduced bench/results.md"
+                    if ok
+                    else "recorded evaluation differs from bench/results.md"
+                )
+                return 0 if ok else 1
+            result = run_eval(args.config, suite, policy, recording)
+            if args.config == "ollama":
+                write_results(result)
+            print(render_markdown(result), end="")
+            return 0
+        except (OSError, ValueError, RuntimeError) as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 1
     delay = float(os.environ.get("AGENT_EVENT_DELAY", "0") or 0)
-    engine = Engine(args.home, shop_db=args.shop_db, delay=delay)
+    registry = default_registry()
+    model = (
+        OllamaModel(registry) if args.cmd == "run" and args.model == "ollama" else None
+    )
+    engine = Engine(
+        args.home,
+        model=model,
+        registry=registry,
+        shop_db=args.shop_db,
+        delay=delay,
+    )
     try:
         if args.cmd == "run":
             budgets = {
@@ -134,7 +195,11 @@ def main(argv=None):
             }
             if args.policy and not Path(args.policy).is_file():
                 raise UsageError(f"policy file not found: {args.policy}")
-            script = load_script(args.script)
+            if args.model == "scripted" and not args.script:
+                raise UsageError("--script is required with --model scripted")
+            if args.model == "ollama" and args.script:
+                raise UsageError("--script cannot be used with --model ollama")
+            script = load_script(args.script) if args.script else []
             Policy.load(args.policy)  # fail early on a malformed policy
             return _report(
                 engine.start(args.goal, script, budgets, policy_path=args.policy)

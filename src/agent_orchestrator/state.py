@@ -19,6 +19,10 @@ EVENT_TYPES = (
     "approval_decided",
     "tool_result",
     "error",
+    "delegation_started",
+    "delegation_waiting",
+    "delegation_resumed",
+    "delegation_finished",
     "budget_hit",
     "finished",
 )
@@ -40,14 +44,23 @@ class RunState:
     step: int = 0  # model calls so far
     tool_calls: int = 0
     tokens: int = 0
+    repairs: int = 0
     budgets: dict = field(default_factory=lambda: dict(DEFAULT_BUDGETS))
     script: list = field(default_factory=list)
     workspace: str = ""
     policy_path: str | None = None
+    model_config: dict = field(default_factory=lambda: {"type": "scripted"})
+    role: str = "lead"
+    parent_id: str | None = None
+    allowed_tools: list[str] | None = None
+    active_child: str | None = None
+    delegated_steps: int = 0
+    delegated_tool_calls: int = 0
     pending: dict | None = (
         None  # tool call waiting to run: call_id, name, args, risk, approved
     )
     pending_action: dict | None = None  # model output not yet turned into an event
+    pending_action_error: str | None = None
     consecutive_errors: int = 0
     answer: str | None = None
     reason: str | None = None
@@ -76,17 +89,24 @@ def reduce(state: RunState, event: dict) -> RunState:
         s.script = d.get("script", [])
         s.workspace = d.get("workspace", "")
         s.policy_path = d.get("policy_path")
+        s.model_config = d.get("model_config", {"type": "scripted"})
+        s.role = d.get("role", "lead")
+        s.parent_id = d.get("parent_id")
+        s.allowed_tools = d.get("allowed_tools")
         s.status = "running"
         s.messages.append({"role": "user", "content": d["goal"]})
     elif t == "model_call":
         s.step += 1
         s.tokens += d["tokens"]
+        s.repairs += d.get("repairs", 0)
         s.pending_action = d["action"]
+        s.pending_action_error = d.get("validation_error")
         s.messages.append({"role": "assistant", "content": d["action"]})
     elif t == "tool_requested":
         s.tool_calls += 1
         s.consecutive_errors = 0
         s.pending_action = None
+        s.pending_action_error = None
         s.pending = {
             "call_id": d["call_id"],
             "name": d["name"],
@@ -118,15 +138,42 @@ def reduce(state: RunState, event: dict) -> RunState:
         s.pending = None
     elif t == "error":
         s.pending_action = None
+        s.pending_action_error = None
         s.consecutive_errors += 1
         s.messages.append({"role": "system", "content": "ERROR: " + d["message"]})
+    elif t == "delegation_started":
+        s.pending_action = None
+        s.pending_action_error = None
+        s.consecutive_errors = 0
+        s.active_child = d["child_id"]
+    elif t == "delegation_waiting":
+        s.status = "waiting_approval"
+    elif t == "delegation_resumed":
+        s.status = "running"
+    elif t == "delegation_finished":
+        s.status = "running"
+        s.active_child = None
+        s.delegated_steps += d["steps"]
+        s.delegated_tool_calls += d["tool_calls"]
+        s.tokens += d["tokens"]
+        s.repairs += d.get("repairs", 0)
+        outcome = d.get("answer") or d.get("reason") or d["status"]
+        s.messages.append(
+            {
+                "role": "tool",
+                "name": "delegate",
+                "content": f"worker {d['status']}: {outcome}",
+            }
+        )
     elif t == "budget_hit":
         s.pending_action = None
+        s.pending_action_error = None
         s.pending = None
         s.status = "budget_exceeded"
         s.reason = d["reason"]
     elif t == "finished":
         s.pending_action = None
+        s.pending_action_error = None
         s.status = d["status"]
         s.answer = d.get("answer")
         s.reason = d.get("reason")
