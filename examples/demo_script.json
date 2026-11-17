@@ -1,0 +1,8 @@
+[
+  {"action": "tool_call", "name": "sql_query", "args": {"query": "SELECT c.name, c.email, SUM(o.qty * p.price) AS revenue FROM orders o JOIN customers c ON c.id = o.customer_id JOIN products p ON p.id = o.product_id GROUP BY c.id ORDER BY revenue DESC LIMIT 1"}},
+  {"action": "tool_call", "name": "calc", "args": {"expression": "2 * 189 + 32 + 3 * 49.5"}},
+  {"action": "tool_call", "name": "fs_write", "args": {"path": "drafts/thanks.md", "content": "Hi Grace, thanks for being our top customer: 558.5 in October."}},
+  {"action": "tool_call", "name": "fs_read", "args": {"path": "drafts/thanks.md"}},
+  {"action": "tool_call", "name": "send_email", "args": {"to": "grace@example.com", "subject": "Thank you", "body": "Hi Grace, thanks for being our top customer: 558.5 in October."}},
+  {"action": "finish", "answer": "Drafted and sent a thank-you to Grace Hopper (558.5 revenue)."}
+]
