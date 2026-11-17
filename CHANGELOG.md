@@ -16,3 +16,12 @@
   recoverable failed repairs, persisted planner configuration across CLI resume/approval, bounded
   Ollama infrastructure retries/exclusions, reject-by-default eval approvals, fair refusal checkers,
   remaining-wall-time child budgets, and mid-child crash recovery coverage.
+- M3 deterministic run-tree replay with recorded model outputs and approvals, fresh seeded
+  workspaces, tool re-execution, first-divergence reporting, and child-run support.
+- `agent replay --to-test` generates a readable pytest plus adjacent JSON recording; the committed
+  local-Ollama showcase regression replays offline.
+- `agent web` serves a localhost-only light/dark run timeline and approval UI with escaping, CSP,
+  exact loopback Host validation, bounded per-session CSRF state, edited-argument schema validation
+  and the engine's run lock.
+- README showcase adds the architecture, replay guarantees, M2 evaluation table, recorded M3
+  transcript and explicit limitations.

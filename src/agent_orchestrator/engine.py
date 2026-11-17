@@ -1,5 +1,6 @@
 """Durable model/tool run loop, including governed lead-to-worker delegation."""
 
+import base64
 import contextlib
 import fcntl
 import json
@@ -53,6 +54,7 @@ class Engine:
         shop_db=None,
         clock=time.monotonic,
         delay=0.0,
+        run_id_factory=None,
     ):
         self.home = Path(home)
         self.home.mkdir(parents=True, exist_ok=True)
@@ -63,6 +65,18 @@ class Engine:
         self.shop_db = Path(shop_db) if shop_db else None
         self.clock = clock
         self.delay = delay
+        self.run_id_factory = run_id_factory or (lambda: uuid.uuid4().hex[:8])
+
+    @staticmethod
+    def _workspace_seed(workspace):
+        """Capture the files present before a run so replay can seed a fresh sandbox."""
+        seed = {}
+        for path in sorted(workspace.rglob("*")):
+            if path.is_file() and not path.is_symlink():
+                seed[path.relative_to(workspace).as_posix()] = base64.b64encode(
+                    path.read_bytes()
+                ).decode("ascii")
+        return seed
 
     def _emit(self, run_id, type_, data):
         event = self.store.append(run_id, type_, data)
@@ -124,9 +138,10 @@ class Engine:
         workspace=None,
         model_config=None,
     ) -> RunState:
-        run_id = run_id or uuid.uuid4().hex[:8]
+        run_id = run_id or self.run_id_factory()
         workspace = Path(workspace or self.home / "runs" / run_id / "workspace")
         workspace.mkdir(parents=True, exist_ok=True)
+        workspace_seed = self._workspace_seed(workspace)
         if allowed_tools is None:
             allowed_tools = list(self.registry.tools)
         if model_config is None:
@@ -143,6 +158,7 @@ class Engine:
                     "script": script or [],
                     "budgets": budgets or {},
                     "workspace": str(workspace),
+                    "workspace_seed": workspace_seed,
                     "policy_path": str(Path(policy_path).resolve())
                     if policy_path
                     else None,
@@ -390,7 +406,7 @@ class Engine:
             key: min(action.budgets.get(key, value), value)
             for key, value in remaining.items()
         }
-        child_id = uuid.uuid4().hex[:8]
+        child_id = self.run_id_factory()
         self._emit(
             state.run_id,
             "delegation_started",

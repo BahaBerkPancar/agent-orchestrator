@@ -22,6 +22,9 @@ uv run agent show <run>                                  # event timeline
 uv run agent approve <run> --decision approve            # or reject | edit --args '{"to": "..."}'
 uv run agent resume <run>                                # after a crash
 uv run agent runs | cancel <run>
+uv run agent replay <run>                                # fresh sandbox, recorded model output
+uv run agent replay <run> --to-test tests/regressions/test_case.py
+uv run agent web                                         # http://127.0.0.1:8070
 ```
 
 Exit codes: 0 done, 1 failed, 2 usage error, 3 waiting for approval, 4 budget exceeded, 5 cancelled, 6 unknown run, 7 run busy (another process is driving it).
@@ -42,6 +45,32 @@ use. Invalid output gets one repair turn containing the specific validator error
 one recoverable invalid action under the runtime's three-consecutive-errors rule. Ollama's prompt and
 generation counts are charged to the token budget, including repair calls. Model configuration is
 stored with the run, so `resume` and `approve` reconstruct the same planner after a process restart.
+
+## Architecture
+
+```text
+CLI / localhost web page
+          |
+          v
+ Engine state machine ----> risk policy / approval interrupt
+    |              |
+    |              +------> sandboxed tools ----> workspace, demo DB, fake outbox
+    v
+append-only SQLite events ----> pure reducer ----> derived checkpoint
+    |
+    +------> ReplayModel + recorded decisions ----> fresh sandbox ----> event comparison
+```
+
+The CLI and web page both call `Engine.decide`; schema validation, the per-run lock and execution
+therefore have one implementation. Replay reconstructs the root and delegated child runs from their
+events, feeds recorded model actions without contacting a model, replays recorded approval choices,
+and re-executes tools against a fresh workspace seeded with the files that existed when the run
+started.
+
+Event comparison includes event type and deterministic event data, including tool name and args,
+success flag, and a SHA-256 hash of each tool result. Sequence numbers, timestamps, run/call IDs,
+workspace paths and elapsed-time-derived child wall budgets are excluded. The first mismatch is
+reported. This detects changed tool behavior without pretending incidental process data is stable.
 
 ## Lead and worker delegation
 
@@ -73,10 +102,13 @@ uv run agent eval --config ollama     # live local run; overwrites the recording
 uv run agent eval --check             # fully offline replay of the committed recording
 ```
 
-The corrected recorded `qwen2.5:3b` run scored **9/20 (45.0%)**, Wilson 95% CI **25.8–65.8%**. It
-used 69 steps, 34 tool calls, 33,721 model tokens, four repair turns and 12 approval requests, with
-zero infrastructure exclusions. The deterministic fake remains **20/20** and demonstrates the
-harness/checkers, not model quality. The original 3/20 M2 sample overstated model failure because its
+| Planner | Passed | Rate | Steps | Tool calls | Tokens | Repairs | Approval requests |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Deterministic fake | 20/20 | 100% | — | — | — | — | — |
+| `qwen2.5:3b` recorded sample | 9/20 | 45.0% (95% CI 25.8–65.8%) | 69 | 34 | 33,721 | 4 | 12 |
+
+The corrected recorded `qwen2.5:3b` run had zero infrastructure exclusions. The deterministic fake
+demonstrates the harness/checkers, not model quality. The original 3/20 M2 sample overstated model failure because its
 finish and nested-call shapes were rejected and one checker mishandled a clean approval rejection;
 those are harness/checker defects now covered by tests. The remaining 11 failures in the corrected
 sample are recorded model behavior: wrong arithmetic/SQL, misuse of `fail`, repetition after success,
@@ -95,41 +127,58 @@ match = { to = "*@example.com" }   # anchored glob per arg; * never matches spac
 decision = "approve"               # or "reject"
 ```
 
-## Demo run (`examples/demo.sh`)
+## Recorded M3 showcase
 
+The committed `tests/regressions/test_ollama_demo.json` came from one local `qwen2.5:3b` run. It
+identified the top customer, then made an unproductive delegation whose worker calculated `0` twice
+and exhausted its small budget. The lead continued, wrote a usable draft, and paused twice. The file
+write was approved; for the email, the model proposed the invalid placeholder
+`customers/name@domain.com`, so the human used the web Edit-args path to replace only the recipient
+with the database value `grace@example.com`. Selected real `agent show` output:
+
+```text
+$ agent show b06c6698
+run b06c6698  status=done  steps=5  tool_calls=3  tokens=6599
+#2    model_call         tool_call sql_query (991 tokens)
+#4    tool_result        c1 sql_query ok=True: {"columns": ["id", "name", "total_revenue"], "rows": [[3, "Grace Hopper", 558.5]] ...
+#5    model_call         delegate Compute the subtotal (1074 tokens)
+#6    delegation_started worker 867469b3 task=Compute the subtotal tools=calc
+#15   delegation_finished worker 867469b3 budget_exceeded
+#17   tool_requested     c2 fs_write ... risk=review
+#18   approval_requested c2 waiting for a human
+#19   approval_decided   c2 approve by human
+#22   tool_requested     c3 send_email ... risk=review
+#23   approval_requested c3 waiting for a human
+#24   approval_decided   c3 edit by human args={..., "to": "grace@example.com"}
+#25   tool_result        c3 send_email ok=True: queued email to grace@example.com in outbox
+#26   model_call         finish {"id": 3, "name": "Grace Hopper", "total_revenue": 558.5} (1388 tokens)
+#27   finished           done: {"id": 3, "name": "Grace Hopper", "total_revenue": 558.5}
+
+$ agent replay b06c6698 --to-test tests/regressions/test_ollama_demo.py
+identical
+wrote tests/regressions/test_ollama_demo.py and tests/regressions/test_ollama_demo.json
+$ pytest -q tests/regressions/test_ollama_demo.py
+1 passed
 ```
-$ agent run --goal "Thank the top customer" --script examples/demo_script.json
-run f21f4e96 status=waiting_approval
-  waiting: send_email {"to": "grace@example.com", "subject": "Thank you", "body": "Hi Grace, thanks for being our top customer: 558.5 in October."}
-  approve with: agent approve f21f4e96 --decision approve|reject|edit [--args '{...}']
 
-...
-$ agent show f21f4e96
-run f21f4e96  status=done  steps=6  tool_calls=5  tokens=116
-goal: Thank the top customer
-#1    06:02:28  started            goal: Thank the top customer
-#2    06:02:28  model_call         tool_call sql_query (40 tokens)
-#3    06:02:28  tool_requested     c1 sql_query {"query": "SELECT c.name, c.email, SUM(o.qty * p.price) AS revenue FROM orders o JOIN customers c ON c
-#4    06:02:28  tool_result        c1 sql_query ok=True: {"columns": ["name", "email", "revenue"], "rows": [["Grace Hopper", "grace@example.com", 558.
-#5    06:02:28  model_call         tool_call calc (15 tokens)
-#6    06:02:28  tool_requested     c2 calc {"expression": "2 * 189 + 32 + 3 * 49.5"} risk=safe
-#7    06:02:28  tool_result        c2 calc ok=True: 558.5
-#8    06:02:28  model_call         tool_call fs_write (19 tokens)
-#9    06:02:28  tool_requested     c3 fs_write {"content": "Hi Grace, thanks for being our top customer: 558.5 in October.", "path": "drafts/thanks.md
-#10   06:02:28  tool_result        c3 fs_write ok=True: wrote 62 chars to drafts/thanks.md
-#11   06:02:28  model_call         tool_call fs_read (7 tokens)
-#12   06:02:28  tool_requested     c4 fs_read {"path": "drafts/thanks.md"} risk=safe
-#13   06:02:28  tool_result        c4 fs_read ok=True: Hi Grace, thanks for being our top customer: 558.5 in October.
-#14   06:02:28  model_call         tool_call send_email (22 tokens)
-#15   06:02:28  tool_requested     c5 send_email {"body": "Hi Grace, thanks for being our top customer: 558.5 in October.", "subject": "Thank you", "t
-#16   06:02:28  approval_requested c5 waiting for a human
-#17   06:02:28  approval_decided   c5 approve by human
-#18   06:02:28  tool_result        c5 send_email ok=True: queued email to grace@example.com in outbox
-#19   06:02:28  model_call         finish Drafted and sent a thank-you to Grace Hopper (558.5 revenue). (13 tokens)
-#20   06:02:28  finished           done: Drafted and sent a thank-you to Grace Hopper (558.5 revenue).
+The query selected the customer's name and revenue but omitted the email column, and the model then
+invented a recipient. The approval gate is what caught that unsafe proposal: no outbox write happened
+until the human supplied the verified address. Replay preserves both the bad proposal and the human
+edit, making the governed outcome reproducible without presenting the model's mistake as acceptable.
 
-$ cat workspace/outbox.jsonl
-{"idempotency_key": "f21f4e96:c5", "to": "grace@example.com", "subject": "Thank you", "body": "Hi Grace, thanks for being our top customer: 558.5 in O```
+## Limits
+
+- Replay proves deterministic engine/tool behavior for recorded outputs; it does not claim that a
+  fresh model call would return the same text.
+- Initial workspace files are embedded in the event recording. The read-only demo database is an
+  external deterministic fixture and must still be available when replaying. Generated tests search
+  their repository parents, `AGENT_SHOP_DB`, the current checkout and the source tree; installed use
+  outside a checkout must pass `shop_db=...` or set `AGENT_SHOP_DB`.
+- The web page is a single-user localhost review surface, not a remotely deployable auth system.
+- SQLite plus `flock` targets one machine. Distributed workers would require a different store and
+  lock implementation behind the same interfaces.
+- The 3B local model is cheap and private but its 45% recorded suite result includes reasoning,
+  tool-selection and delegation mistakes; approvals govern side effects, not answer quality.
 
 ## Setup
 

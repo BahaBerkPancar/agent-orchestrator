@@ -123,6 +123,13 @@ def build_parser():
     sh = sub.add_parser("show", help="print a run's event timeline")
     sh.add_argument("run")
     sub.add_parser("runs", help="list runs")
+    rp = sub.add_parser("replay", help="re-execute a run from recorded model outputs")
+    rp.add_argument("run")
+    rp.add_argument("--to-test", help="write a pytest plus adjacent JSON fixture")
+    rp.add_argument("--home", dest="command_home", help=argparse.SUPPRESS)
+    web = sub.add_parser("web", help="serve the local approval page")
+    web.add_argument("--port", type=int, default=8070)
+    web.add_argument("--home", dest="command_home", help=argparse.SUPPRESS)
     ev = sub.add_parser("eval", help="run the 20-task planner evaluation")
     ev.add_argument("--config", choices=["fake", "ollama"], default="fake")
     ev.add_argument("--check", action="store_true", help="replay and verify recordings")
@@ -169,13 +176,22 @@ def main(argv=None):
         except (OSError, ValueError, RuntimeError) as e:
             print(f"error: {e}", file=sys.stderr)
             return 1
+    home = getattr(args, "command_home", None) or args.home
+    if args.cmd == "web":
+        from .web import serve
+
+        if not 1 <= args.port <= 65535:
+            print("error: --port must be between 1 and 65535", file=sys.stderr)
+            return EXIT_USAGE
+        serve(home, args.shop_db, args.port)
+        return 0
     delay = float(os.environ.get("AGENT_EVENT_DELAY", "0") or 0)
     registry = default_registry()
     model = (
         OllamaModel(registry) if args.cmd == "run" and args.model == "ollama" else None
     )
     engine = Engine(
-        args.home,
+        home,
         model=model,
         registry=registry,
         shop_db=args.shop_db,
@@ -235,6 +251,30 @@ def main(argv=None):
             for ev in engine.store.events(args.run):
                 clock = time.strftime("%H:%M:%S", time.localtime(ev["ts"]))
                 print(f"#{ev['seq']:<4} {clock}  {ev['type']:<18} {_summary(ev)}")
+            return 0
+        if args.cmd == "replay":
+            from .replay import (
+                recording_from_store,
+                replay_run,
+                write_regression_test,
+            )
+
+            result = replay_run(
+                engine.store, args.run, shop_db=args.shop_db, registry=registry
+            )
+            print(result.message)
+            if not result.identical:
+                print(f"  original: {json.dumps(result.original, sort_keys=True)}")
+                print(f"  replayed: {json.dumps(result.replayed, sort_keys=True)}")
+                return 1
+            if args.to_test:
+                try:
+                    fixture = write_regression_test(
+                        args.to_test, recording_from_store(engine.store, args.run)
+                    )
+                except (OSError, ValueError) as exc:
+                    raise UsageError(str(exc)) from None
+                print(f"wrote {args.to_test} and {fixture}")
             return 0
     except RunBusy as e:
         print(f"error: {e}", file=sys.stderr)
