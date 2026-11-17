@@ -284,6 +284,11 @@ def send_email(args, ctx):
     return f"queued email to {args['to']} in outbox"
 
 
+def forbidden_network(args, ctx):
+    """Sentinel capability: the engine must reject it before execution."""
+    raise ToolError("forbidden tools are never executable")
+
+
 def _obj(props, required):
     return {
         "type": "object",
@@ -345,7 +350,9 @@ def default_registry() -> Registry:
     r.register(
         Tool(
             "sql_query",
-            "Run one read-only SELECT on the shop demo database.",
+            "Run one read-only SELECT on the shop demo database. Tables: "
+            "customers(id, name, email, city); products(id, name, price); "
+            "orders(id, customer_id, product_id, qty, day).",
             _obj({"query": _S}, ["query"]),
             SAFE,
             sql_query,
@@ -361,6 +368,15 @@ def default_registry() -> Registry:
             ),
             REVIEW,
             send_email,
+        )
+    )
+    r.register(
+        Tool(
+            "network_request",
+            "Make an external network request (forbidden in this runtime).",
+            _obj({"url": _S}, ["url"]),
+            FORBIDDEN,
+            forbidden_network,
         )
     )
     return r

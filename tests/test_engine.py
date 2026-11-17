@@ -4,6 +4,7 @@ import pytest
 
 from agent_orchestrator.engine import UsageError
 from agent_orchestrator.model import (
+    Finish,
     MalformedAction,
     ScriptedModel,
     ToolCall,
@@ -241,8 +242,7 @@ def test_parse_action_and_model():
     assert parse_action(
         {"action": "tool_call", "name": "calc", "args": {}}
     ) == ToolCall("calc", {})
-    with pytest.raises(MalformedAction):
-        parse_action({"action": "finish", "answer": 3})
+    assert parse_action({"action": "finish", "answer": 3}) == Finish("3")
     with pytest.raises(MalformedAction):
         ScriptedModel([{"bad": 1}]).next(type("S", (), {"step": 0})())
     assert ScriptedModel([]).count_tokens({"a": "one two three"}) > 2

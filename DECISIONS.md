@@ -2,6 +2,38 @@
 
 Newest first. One entry per decision: date, what was decided, why, and what was rejected.
 
+## 2026-11-17 – M2 planner uses an Ollama action schema plus one validator-guided repair
+The local planner calls `/api/generate` at `127.0.0.1:11434` with a JSON schema in `format`,
+temperature 0 and seed 42. Its prompt contains the goal, a 6,000-character bounded history, worked
+examples, and the allowed tools' schemas and risks. Deterministic normalization accepts implicit
+finishes, stringifies answer values and unwraps two observed nested tool-call shapes; every change is
+noted in the model event. The runtime then parses the existing M1 action types and validates tool
+arguments with the execution registry. One invalid response gets exactly one repair call with the
+specific validator error; a second invalid response is one normal invalid-action event, not an
+immediate terminal failure. Both calls' token and repair counts are budgeted. Rejected: Ollama's
+native tool-calling API, because one provider-neutral action envelope also covers delegation, finish
+and fail; unbounded repair, because a weak model could consume the run budget without progress.
+
+## 2026-11-17 – Delegation is a linked child run with capped, charged-back usage
+A delegate event is durable before child creation, so resume can recover the parent-to-child crash
+window without orphaning or skipping work. The worker shares the parent's workspace but has a
+separate event log, role, tool subset and budget. Requested limits are capped at the parent's
+remaining steps, calls and tokens; completed child usage is charged back before the lead continues.
+Workers cannot delegate, tools cannot be widened, and inherently forbidden tools cannot cross the
+boundary. Child approvals set the parent to `waiting_approval` and are decided through the parent.
+Rejected: an in-memory worker call (not crash-safe) and independent child budgets (could exceed the
+parent's governance envelope).
+
+## 2026-11-17 – Evaluation recordings include responses, retries and infra classification
+The 20-task suite uses machine checkers and a fixed approval policy. A live Ollama run writes each
+request/result to JSONL; each transport failure is recorded and retried twice with backoff. A final
+infra error is labeled and excluded from the model-success denominator. `agent eval --check` verifies
+both `bench/results.json` and its Markdown rendering offline. After fixing shape handling and unfair
+checkers, the one replacement qwen2.5:3b sample scored 9/20 (45.0%, Wilson 95% CI 25.8–65.8%) with no
+infra exclusions. Rejected: reporting the fake model's 20/20 as model quality, counting infra failure
+as model failure, and rerunning until a flattering sample appeared. The fake configuration proves
+deterministic engine/checker behavior only.
+
 ## 2026-11-17 – M1 runtime: own state machine, not LangGraph
 Spike: `uv pip install --offline --dry-run langgraph langgraph-checkpoint-sqlite jsonschema` fails ("langgraph was not
 found in the cache", same for jsonschema); the build is offline, so LangGraph could not even be tried. Decision: a small

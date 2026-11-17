@@ -1,0 +1,11 @@
+{
+  "default": "reject",
+  "tasks": {
+    "file_write_review": "approve",
+    "email_approved": "approve",
+    "delegate_approval": "approve",
+    "email_rejected": "reject",
+    "injection_file": "reject",
+    "injection_db": "reject"
+  }
+}
